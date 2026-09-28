@@ -1,0 +1,129 @@
+blueprint:
+  name: Ajastettu kytkin/valo varmistuksella (retry)
+  description: >
+    Kytkee valitun laitteen päälle tai pois tiettyyn kellonaikaan tai
+    auringonlaskun/-nousun mukaan, ja yrittää uudelleen tietyin väliajoin
+    kunnes komento onnistuu (tai enimmäisyritykset täyttyvät).
+    Lisää tästä uusi automaatio jokaista ajastusta varten — kaikki
+    asetukset tehdään käyttöliittymän lomakkeella, ei YAML:ia.
+  domain: automation
+  input:
+    target_entity:
+      name: Kohdelaite
+      description: Valo tai pistorasia/kytkin jota ohjataan
+      selector:
+        entity:
+          domain: [light, switch]
+    target_state:
+      name: Tavoiteltava tila
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - label: Päälle
+              value: "on"
+            - label: Pois
+              value: "off"
+    trigger_type:
+      name: Ajastuksen tyyppi
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - label: Kellonaika
+              value: time
+            - label: Auringonlasku
+              value: sunset
+            - label: Auringonnousu
+              value: sunrise
+      default: time
+    trigger_time:
+      name: Kellonaika
+      description: Käytetään vain jos ajastuksen tyyppi on "Kellonaika"
+      default: "17:00:00"
+      selector:
+        time: {}
+    sun_offset:
+      name: Siirtymä auringon tapahtumaan
+      description: >
+        Käytetään jos tyyppi on auringonlasku/-nousu. Esim. -00:30:00 laukaisee
+        puoli tuntia ennen, 00:15:00 vartin jälkeen. Muoto TT:MM:SS.
+      default: "00:00:00"
+      selector:
+        text: {}
+    retry_interval:
+      name: Yritysväli
+      description: Kuinka usein komento yritetään uudelleen, jos tila ei muutu
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 300
+          unit_of_measurement: s
+    max_retries:
+      name: Yritysten enimmäismäärä
+      description: Turvaraja, ettei silmukka jää pyörimään loputtomiin
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 200
+
+mode: single
+max_exceeded: silent
+
+variables:
+  target_entity: !input target_entity
+  target_state: !input target_state
+  trigger_type_var: !input trigger_type
+  max_retries: !input max_retries
+
+trigger:
+  - trigger: time
+    at: !input trigger_time
+    id: time_trigger
+  - trigger: sun
+    event: sunset
+    offset: !input sun_offset
+    id: sunset_trigger
+  - trigger: sun
+    event: sunrise
+    offset: !input sun_offset
+    id: sunrise_trigger
+
+condition:
+  - condition: or
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.id == 'time_trigger' and trigger_type_var == 'time' }}"
+      - condition: template
+        value_template: "{{ trigger.id == 'sunset_trigger' and trigger_type_var == 'sunset' }}"
+      - condition: template
+        value_template: "{{ trigger.id == 'sunrise_trigger' and trigger_type_var == 'sunrise' }}"
+
+action:
+  - repeat:
+      sequence:
+        - choose:
+            - conditions: "{{ target_state == 'on' }}"
+              sequence:
+                - action: homeassistant.turn_on
+                  target:
+                    entity_id: !input target_entity
+                  continue_on_error: true
+            - conditions: "{{ target_state == 'off' }}"
+              sequence:
+                - action: homeassistant.turn_off
+                  target:
+                    entity_id: !input target_entity
+                  continue_on_error: true
+        - delay:
+            seconds: !input retry_interval
+      until:
+        - condition: or
+          conditions:
+            - condition: state
+              entity_id: !input target_entity
+              state: !input target_state
+            - condition: template
+              value_template: "{{ repeat.index >= max_retries }}"
